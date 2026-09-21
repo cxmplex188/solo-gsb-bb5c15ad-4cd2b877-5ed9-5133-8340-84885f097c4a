@@ -116,6 +116,22 @@
           </label>
         </div>
 
+        <fieldset class="calibrate-box">
+          <legend>自动校准（估算全局平移）</legend>
+          <div class="grid-2">
+            <label class="field">
+              <span>X 最大校准量 (mm)</span>
+              <input id="qcMaxCalX" type="number" min="0" step="0.5" value="5">
+            </label>
+            <label class="field">
+              <span>Y 最大校准量 (mm)</span>
+              <input id="qcMaxCalY" type="number" min="0" step="0.5" value="5">
+            </label>
+          </div>
+          <button id="qcAutoCal" type="button">估算全局平移并写回偏移</button>
+          <div id="qcCalMsg" class="cal-msg" hidden></div>
+        </fieldset>
+
         <div class="actions">
           <button id="qcRun" type="button">开始质检</button>
           <button id="qcDownloadCsv" type="button" disabled>下载质检报告 CSV</button>
@@ -146,7 +162,7 @@
   </main>
 
   <footer>
-    <p>转换规则：大写字母前加大写前缀 ⠠；连续数字段仅在段首加一个数字前缀 ⠼；按盲文单元整词换行，放不下时给出原因，绝不裁切。质检比较时先应用校准偏移，再在关联半径内做一对一最优匹配。</p>
+    <p>转换规则：大写字母前加大写前缀 ⠠；连续数字段仅在段首加一个数字前缀 ⠼；按盲文单元整词换行，放不下时给出原因，绝不裁切。质检比较时先应用校准偏移，再在关联半径内做一对一最优匹配；自动校准以「设计 − 实测」候选平移估算全局偏移并写回。</p>
   </footer>
 
   <script src="../lib/braille.js"></script>

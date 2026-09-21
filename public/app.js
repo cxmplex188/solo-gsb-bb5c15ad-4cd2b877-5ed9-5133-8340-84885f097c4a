@@ -3,7 +3,8 @@
  * 两种模式：
  *   - 排版：输入变化 -> 防抖调用 POST /api/layout -> 渲染 SVG 预览 / 错误 -> 下载 SVG/JSON
  *   - 压印质检：以最近一次成功排版的设计点为基准，粘贴实测 CSV 并设置偏移/公差/半径，
- *     调用 POST /api/qc（浏览器端也可直接用 window.QC 同构计算），渲染四类叠加 SVG 与报告下载
+ *     调用 POST /api/qc（浏览器端也可直接用 window.QC 同构计算），渲染四类叠加 SVG 与报告下载；
+ *     「自动校准」调用 POST /api/qc/calibrate 估算全局平移，写回偏移输入框并自动重跑质检
  */
 (function () {
   'use strict';
@@ -169,6 +170,10 @@
   var qcOffsetY = document.getElementById('qcOffsetY');
   var qcTolerance = document.getElementById('qcTolerance');
   var qcMaxRadius = document.getElementById('qcMaxRadius');
+  var qcMaxCalX = document.getElementById('qcMaxCalX');
+  var qcMaxCalY = document.getElementById('qcMaxCalY');
+  var qcAutoCal = document.getElementById('qcAutoCal');
+  var qcCalMsg = document.getElementById('qcCalMsg');
   var qcRun = document.getElementById('qcRun');
   var qcErrors = document.getElementById('qcErrors');
   var qcStats = document.getElementById('qcStats');
@@ -289,6 +294,68 @@
 
   qcRun.addEventListener('click', runQc);
 
+  /* ---------- 自动校准：估算全局平移并写回偏移 ---------- */
+
+  function showCalMsg(msg, ok) {
+    qcCalMsg.textContent = msg;
+    qcCalMsg.className = 'cal-msg ' + (ok ? 'ok' : 'fail');
+    qcCalMsg.hidden = false;
+  }
+
+  function handleCalibrateResult(r) {
+    if (r.ok) {
+      // 写回偏移输入框并自动重跑四类判定
+      qcOffsetX.value = r.offset.dx;
+      qcOffsetY.value = r.offset.dy;
+      showCalMsg(
+        '已估算全局平移：X 偏移 ' + r.offset.dx + ' mm，Y 偏移 ' + r.offset.dy + ' mm' +
+        '（候选 ' + r.candidateCount + ' 个，匹配 ' + r.matchedCount + ' 对，总残差 ' +
+        r.totalResidual + ' mm）；已写回偏移输入框并自动重新质检。', true
+      );
+      runQc();
+    } else {
+      // 无可用候选或输入有误：保留原偏移值，明确提示
+      var msg = (r.errors || [{ message: '未知错误' }]).map(function (e) { return e.message; }).join(' ');
+      showCalMsg('自动校准未完成，已保留原偏移值。' + msg, false);
+    }
+  }
+
+  function runAutoCalibrate() {
+    if (!lastBaseline) {
+      refreshBaselineBox();
+      showCalMsg('没有成功排版的设计点基准，请先在「排版模式」完成排版。', false);
+      return;
+    }
+    var payload = {
+      design: lastBaseline.dots,
+      csv: qcCsv.value,
+      maxCalibrateX: numVal(qcMaxCalX),
+      maxCalibrateY: numVal(qcMaxCalY),
+      maxRadius: numVal(qcMaxRadius)
+    };
+    fetch('/api/qc/calibrate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    })
+      .then(function (res) { return res.json(); })
+      .then(handleCalibrateResult)
+      .catch(function () {
+        // 服务不可用时回退到浏览器内置同构实现
+        if (window.QC && QC.estimateOffset) {
+          try {
+            handleCalibrateResult(QC.estimateOffset(payload));
+          } catch (e) {
+            showCalMsg('自动校准计算失败：' + e.message, false);
+          }
+        } else {
+          showCalMsg('网络请求失败，请确认服务已启动。', false);
+        }
+      });
+  }
+
+  qcAutoCal.addEventListener('click', runAutoCalibrate);
+
   // 参数或 CSV 修改后防抖自动重跑（已有质检结果时），手动按钮始终可用
   [qcCsv, qcOffsetX, qcOffsetY, qcTolerance, qcMaxRadius].forEach(function (el) {
     el.addEventListener('input', function () {
@@ -296,6 +363,11 @@
       clearTimeout(qcTimer);
       qcTimer = setTimeout(runQc, 300);
     });
+  });
+
+  // 校准量输入变化时使旧校准提示失效（避免误导）
+  [qcMaxCalX, qcMaxCalY].forEach(function (el) {
+    el.addEventListener('input', function () { qcCalMsg.hidden = true; });
   });
 
   btnQcCsv.addEventListener('click', function () {

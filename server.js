@@ -1,6 +1,7 @@
 /*
  * 盲文标签排版台 —— Express 服务端
- * 提供静态页面与 API：POST /api/layout（排版）、POST /api/qc（压印质检）
+ * 提供静态页面与 API：POST /api/layout（排版）、POST /api/qc（压印质检）、
+ * POST /api/qc/calibrate（自动校准：估算全局平移）
  */
 'use strict';
 
@@ -45,6 +46,19 @@ app.post('/api/qc', (req, res) => {
     maxRadius: body.maxRadius,
     plateWidth: body.plateWidth,
     plateHeight: body.plateHeight
+  });
+  res.json(result);
+});
+
+// 自动校准接口：以「设计 − 实测」候选平移复用一对一匹配，估算全局平移
+app.post('/api/qc/calibrate', (req, res) => {
+  const body = req.body || {};
+  const result = QC.estimateOffset({
+    design: body.design,
+    csv: body.csv,
+    maxCalibrateX: body.maxCalibrateX,
+    maxCalibrateY: body.maxCalibrateY,
+    maxRadius: body.maxRadius
   });
   res.json(result);
 });

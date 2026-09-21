@@ -141,3 +141,129 @@ test('无设计点也无实测点时通过率 100%', () => {
   assert.equal(r.stats.maxDeviation, null);
   assert.equal(r.stats.meanDeviation, null);
 });
+
+/* ---------- 自动校准（估算全局平移） ---------- */
+
+test('自动校准：乱序实测点估出全局平移，写回后重跑全部合格', () => {
+  const design = [];
+  for (let x = 10; x <= 40; x += 10) for (let y = 10; y <= 30; y += 10) design.push({ x, y });
+  // 实测 = 设计 + (-1.2, 0.8)，并确定性打乱粘贴顺序
+  const pts = design.map(d => [d.x - 1.2, d.y + 0.8]);
+  for (let i = pts.length - 1; i > 0; i--) {
+    const j = (i * 7) % (i + 1);
+    [pts[i], pts[j]] = [pts[j], pts[i]];
+  }
+  const csv = pts.map(p => p[0] + ',' + p[1]).join('\n');
+  const est = QC.estimateOffset({ design, csv, maxCalibrateX: 3, maxCalibrateY: 3, maxRadius: 1.5 });
+  assert.equal(est.ok, true);
+  assert.equal(est.offset.dx, 1.2);
+  assert.equal(est.offset.dy, -0.8);
+  assert.equal(est.matchedCount, design.length);
+  // 写回偏移后重跑质检：全部合格，无缺失/多余
+  const r = QC.inspect({
+    design, csv, offsetX: est.offset.dx, offsetY: est.offset.dy,
+    tolerance: 0.05, maxRadius: 1.5
+  });
+  assert.equal(r.stats.passCount, design.length);
+  assert.equal(r.stats.missingCount, 0);
+  assert.equal(r.stats.extraCount, 0);
+});
+
+test('自动校准：任一轴超限的候选被过滤，无候选时明确报错', () => {
+  const design = [{ x: 0, y: 0 }, { x: 10, y: 0 }];
+  const csv = '3.5,0.4\n13.5,0.4'; // 真实平移 (-3.5, -0.4)
+  // X 最大校准量 3 < 3.5：所有候选被过滤
+  const bad = QC.estimateOffset({ design, csv, maxCalibrateX: 3, maxCalibrateY: 3, maxRadius: 1 });
+  assert.equal(bad.ok, false);
+  assert.equal(bad.offset, null);
+  assert.match(bad.errors[0].message, /没有可用候选/);
+  // 放宽 X 校准量后估出正确平移
+  const good = QC.estimateOffset({ design, csv, maxCalibrateX: 4, maxCalibrateY: 3, maxRadius: 1 });
+  assert.equal(good.ok, true);
+  assert.equal(good.offset.dx, -3.5);
+  assert.equal(good.offset.dy, -0.4);
+});
+
+test('自动校准：缺失点与多余点不妨碍估出正确平移', () => {
+  const design = [{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 20, y: 0 }, { x: 30, y: 0 }, { x: 40, y: 0 }];
+  // 缺第 3 个设计点，整体平移 (2, -1)，另加 2 个多余噪点
+  const csv = '2,-1\n12,-1\n32,-1\n42,-1\n95,90\n-60,40';
+  const est = QC.estimateOffset({ design, csv, maxCalibrateX: 5, maxCalibrateY: 5, maxRadius: 1 });
+  assert.equal(est.ok, true);
+  assert.equal(est.offset.dx, -2);
+  assert.equal(est.offset.dy, 1);
+  assert.equal(est.matchedCount, 4);
+  const r = QC.inspect({
+    design, csv, offsetX: est.offset.dx, offsetY: est.offset.dy,
+    tolerance: 0.1, maxRadius: 1
+  });
+  assert.equal(r.stats.passCount, 4);
+  assert.equal(r.stats.missingCount, 1);
+  assert.equal(r.stats.extraCount, 2);
+});
+
+test('自动校准：基于逐候选匹配而非质心差（多余点不拉偏结果）', () => {
+  const design = [{ x: 0, y: 0 }, { x: 10, y: 0 }];
+  // 真实平移 (1,0)；多余点 (100,100) 会把实测质心拉到 (37.3,33.3)，
+  // 质心差 ≈ (-32.3,-33.3)，与正确结果 (-1,0) 完全不同
+  const csv = '1,0\n11,0\n100,100';
+  const est = QC.estimateOffset({ design, csv, maxCalibrateX: 50, maxCalibrateY: 50, maxRadius: 1 });
+  assert.equal(est.ok, true);
+  assert.equal(est.offset.dx, -1);
+  assert.equal(est.offset.dy, 0);
+  assert.equal(est.matchedCount, 2);
+});
+
+test('自动校准决胜：匹配数相同取总残差最小', () => {
+  const design = [{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 20, y: 0 }];
+  // 候选 (-0.3,0) 匹配 3 对、残差 0.6；候选 (-0.9,0) 匹配 3 对、残差 1.2
+  const csv = '0.3,0\n10.3,0\n20.9,0';
+  const est = QC.estimateOffset({ design, csv, maxCalibrateX: 2, maxCalibrateY: 2, maxRadius: 1 });
+  assert.equal(est.ok, true);
+  assert.equal(est.offset.dx, -0.3);
+  assert.equal(est.offset.dy, 0);
+  assert.equal(est.matchedCount, 3);
+  assert.ok(Math.abs(est.totalResidual - 0.6) < 1e-9);
+});
+
+test('自动校准决胜：残差相同取 |dx|+|dy| 最小', () => {
+  const design = [{ x: 0, y: 0 }];
+  // 候选 (0,0) 与 (-5,0)：均匹配 1 对、残差 0，L1 分别 0 与 5
+  const csv = '0,0\n5,0';
+  const est = QC.estimateOffset({ design, csv, maxCalibrateX: 10, maxCalibrateY: 10, maxRadius: 1 });
+  assert.equal(est.offset.dx, 0);
+  assert.equal(est.offset.dy, 0);
+});
+
+test('自动校准决胜：|dx|+|dy| 相同取 dx 数值升序', () => {
+  const design = [{ x: 0, y: 0 }];
+  // 候选 (2,3) 与 (-2,3)：均匹配 1 对、残差 0、L1 均为 5 → 取 dx 较小的 (-2,3)
+  const csv = '-2,-3\n2,-3';
+  const est = QC.estimateOffset({ design, csv, maxCalibrateX: 10, maxCalibrateY: 10, maxRadius: 1 });
+  assert.equal(est.offset.dx, -2);
+  assert.equal(est.offset.dy, 3);
+});
+
+test('自动校准：实测点顺序不影响估算结果', () => {
+  const design = [{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 0, y: 10 }, { x: 10, y: 10 }];
+  const csvA = '1.5,2.5\n11.5,2.5\n1.5,12.5\n11.5,12.5';
+  const csvB = '11.5,12.5\n1.5,12.5\n11.5,2.5\n1.5,2.5';
+  const a = QC.estimateOffset({ design, csv: csvA, maxCalibrateX: 5, maxCalibrateY: 5, maxRadius: 1 });
+  const b = QC.estimateOffset({ design, csv: csvB, maxCalibrateX: 5, maxCalibrateY: 5, maxRadius: 1 });
+  assert.deepEqual(b.offset, a.offset);
+  assert.equal(a.offset.dx, -1.5);
+  assert.equal(a.offset.dy, -2.5);
+});
+
+test('自动校准：参数与 CSV 错误按既有规则返回', () => {
+  const design = [{ x: 0, y: 0 }];
+  const badParam = QC.estimateOffset({ design, csv: '0,0', maxCalibrateX: 0, maxCalibrateY: -1, maxRadius: 1 });
+  assert.equal(badParam.ok, false);
+  assert.match(badParam.errors[0].message, /X 最大校准量/);
+  const badCsv = QC.estimateOffset({ design, csv: '1,2,3', maxCalibrateX: 1, maxCalibrateY: 1, maxRadius: 1 });
+  assert.equal(badCsv.ok, false);
+  assert.ok(badCsv.errors.some(e => e.line === 1));
+  const noDesign = QC.estimateOffset({ csv: '0,0', maxCalibrateX: 1, maxCalibrateY: 1, maxRadius: 1 });
+  assert.equal(noDesign.ok, false);
+  assert.match(noDesign.errors[0].message, /缺少设计点基准/);
+});
