@@ -116,6 +116,22 @@
           </label>
         </div>
 
+        <div class="calibrate">
+          <div class="grid-2">
+            <label class="field">
+              <span>X 最大校准量 (mm)</span>
+              <input id="qcMaxOffsetX" type="number" min="0" step="0.1" value="2">
+            </label>
+            <label class="field">
+              <span>Y 最大校准量 (mm)</span>
+              <input id="qcMaxOffsetY" type="number" min="0" step="0.1" value="2">
+            </label>
+          </div>
+          <button id="qcAutoCalibrate" type="button" class="btn-secondary">一键估算全局平移</button>
+          <p class="hint">枚举「设计点－实测点」候选平移，仅保留两轴均未超限者，按匹配数最多、总残差最小、|dx|+|dy| 最小决胜；自动写回偏移并重跑（不使用质心差）。</p>
+          <div id="qcCalibMsg" class="calib-msg" role="status" hidden></div>
+        </div>
+
         <div class="actions">
           <button id="qcRun" type="button">开始质检</button>
           <button id="qcDownloadCsv" type="button" disabled>下载质检报告 CSV</button>

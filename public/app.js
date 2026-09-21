@@ -175,6 +175,10 @@
   var qcPreview = document.getElementById('qcPreview');
   var qcLegend = document.getElementById('qcLegend');
   var qcBaseline = document.getElementById('qcBaseline');
+  var qcMaxOffsetX = document.getElementById('qcMaxOffsetX');
+  var qcMaxOffsetY = document.getElementById('qcMaxOffsetY');
+  var qcAutoCalibrate = document.getElementById('qcAutoCalibrate');
+  var qcCalibMsg = document.getElementById('qcCalibMsg');
   var btnQcCsv = document.getElementById('qcDownloadCsv');
   var btnQcSvg = document.getElementById('qcDownloadSvg');
 
@@ -289,9 +293,76 @@
 
   qcRun.addEventListener('click', runQc);
 
-  // 参数或 CSV 修改后防抖自动重跑（已有质检结果时），手动按钮始终可用
-  [qcCsv, qcOffsetX, qcOffsetY, qcTolerance, qcMaxRadius].forEach(function (el) {
+  /* ---------- 自动校准：一键估算全局平移并写回偏移输入框 ---------- */
+
+  function showCalibMsg(kind, text) {
+    qcCalibMsg.className = 'calib-msg ' + kind;
+    qcCalibMsg.textContent = text;
+    qcCalibMsg.hidden = false;
+  }
+
+  function handleCalibResult(r) {
+    if (r.ok) {
+      // 写回估算值（程序化赋值，不会触发 input 事件），再立即重跑四类判定
+      qcOffsetX.value = r.offsetX;
+      qcOffsetY.value = r.offsetY;
+      showCalibMsg(
+        'ok',
+        '估算全局平移：X = ' + r.offsetX + ' mm，Y = ' + r.offsetY +
+        ' mm（候选 ' + r.candidateCount + ' 个，匹配 ' + r.matchedCount +
+        ' 对，总残差 ' + r.totalResidual + ' mm）；偏移已写回并自动重跑质检。'
+      );
+      runQc();
+    } else {
+      // 无可用候选 / 参数非法：保留偏移输入框原值，仅给出明确提示
+      var msg = (r.errors && r.errors[0] && r.errors[0].message) || '自动校准失败。';
+      showCalibMsg('warn', '未能估算全局平移，偏移输入保持原值：' + msg);
+    }
+  }
+
+  function runAutoCalibrate() {
+    if (!lastBaseline) {
+      refreshBaselineBox();
+      renderQcErrors([{ message: '没有成功排版的设计点基准，请先在「排版模式」完成排版。' }]);
+      return;
+    }
+    var payload = {
+      design: lastBaseline.dots,
+      csv: qcCsv.value,
+      maxOffsetX: numVal(qcMaxOffsetX),
+      maxOffsetY: numVal(qcMaxOffsetY),
+      maxRadius: numVal(qcMaxRadius)
+    };
+    qcAutoCalibrate.disabled = true;
+    fetch('/api/qc/calibrate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    })
+      .then(function (res) { return res.json(); })
+      .then(function (r) { handleCalibResult(r); })
+      .catch(function () {
+        // 服务不可用时回退到浏览器内置同构实现
+        if (window.QC) {
+          try {
+            handleCalibResult(QC.estimateCalibration(payload));
+          } catch (e) {
+            showCalibMsg('warn', '自动校准计算失败：' + e.message);
+          }
+        } else {
+          showCalibMsg('warn', '网络请求失败，请确认服务已启动；偏移输入保持原值。');
+        }
+      })
+      .finally(function () { qcAutoCalibrate.disabled = false; });
+  }
+
+  qcAutoCalibrate.addEventListener('click', runAutoCalibrate);
+
+  // 参数或 CSV 修改后防抖自动重跑（已有质检结果时），手动按钮始终可用；
+  // 输入一旦被改动，清掉上一次自动校准的提示
+  [qcCsv, qcOffsetX, qcOffsetY, qcTolerance, qcMaxRadius, qcMaxOffsetX, qcMaxOffsetY].forEach(function (el) {
     el.addEventListener('input', function () {
+      if (!qcCalibMsg.hidden) qcCalibMsg.hidden = true;
       if (!lastQc) return;
       clearTimeout(qcTimer);
       qcTimer = setTimeout(runQc, 300);

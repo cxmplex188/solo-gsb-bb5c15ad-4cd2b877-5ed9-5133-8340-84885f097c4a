@@ -49,6 +49,19 @@ app.post('/api/qc', (req, res) => {
   res.json(result);
 });
 
+// 自动校准：粘贴无序实测点 + X/Y 最大校准量，一键估算全局平移
+app.post('/api/qc/calibrate', (req, res) => {
+  const body = req.body || {};
+  const result = QC.estimateCalibration({
+    design: body.design,
+    csv: body.csv,
+    maxOffsetX: body.maxOffsetX,
+    maxOffsetY: body.maxOffsetY,
+    maxRadius: body.maxRadius
+  });
+  res.json(result);
+});
+
 // 健康检查（容器编排用）
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', service: 'braille-label-studio', time: new Date().toISOString() });

@@ -141,3 +141,148 @@ test('无设计点也无实测点时通过率 100%', () => {
   assert.equal(r.stats.maxDeviation, null);
   assert.equal(r.stats.meanDeviation, null);
 });
+
+/* ---------- 自动校准（全局平移估算） ---------- */
+
+test('自动校准：无序实测点 + 缺失点 + 多余点也能估中真实平移', () => {
+  const design = [
+    { x: 5, y: 5 }, { x: 11, y: 5 }, { x: 11, y: 7.5 },
+    { x: 17, y: 5 }, { x: 17, y: 7.5 }
+  ];
+  // 实测整体平移 (+0.35, -0.20)（比较坐标 = 实测 + 偏移，故估算值应为 (-0.35, 0.2)）；
+  // 顺序故意打乱，缺设计点 3，另混入一个多余点 (30,30)
+  const csv =
+    '17.35,7.30\n' +   // 对应设计点 5
+    '5.35,4.80\n' +    // 对应设计点 1
+    '30,30\n' +        // 多余
+    '17.35,4.80\n' +   // 对应设计点 4
+    '11.35,4.80\n';    // 对应设计点 2（设计点 3 缺失）
+  const r = QC.estimateCalibration({
+    design, csv, maxOffsetX: 2, maxOffsetY: 2, maxRadius: 0.3
+  });
+  assert.equal(r.ok, true);
+  assert.ok(Math.abs(r.offsetX - -0.35) < 1e-9, 'dx=' + r.offsetX);
+  assert.ok(Math.abs(r.offsetY - 0.2) < 1e-9, 'dy=' + r.offsetY);
+  assert.equal(r.matchedCount, 4); // 缺失 1 个设计点不影响匹配
+});
+
+test('自动校准：把估算偏移写回 inspect 后配对结果与真实平移一致', () => {
+  const design = [{ x: 5, y: 5 }, { x: 11, y: 5 }, { x: 11, y: 7.5 }];
+  const csv = '11.4,5.25\n5.4,5.25\n11.4,7.75'; // 乱序、整体 (+0.4,+0.25)
+  const est = QC.estimateCalibration({ design, csv, maxOffsetX: 1, maxOffsetY: 1, maxRadius: 0.2 });
+  assert.equal(est.ok, true);
+  const r = QC.inspect({
+    design, csv, offsetX: est.offsetX, offsetY: est.offsetY,
+    tolerance: 0.15, maxRadius: 0.2
+  });
+  assert.equal(r.stats.matchedCount, 3);
+  assert.equal(r.stats.passCount, 3);
+  assert.equal(r.stats.missingCount, 0);
+  assert.equal(r.stats.extraCount, 0);
+});
+
+test('自动校准：候选平移两轴均限幅，超限候选被丢弃', () => {
+  const design = [{ x: 5, y: 5 }, { x: 10, y: 5 }];
+  // 真实平移 (+3,0)；X 最大校准量仅 1 -> 真实候选被剔除
+  const csv = '8,5\n13,5';
+  const r = QC.estimateCalibration({ design, csv, maxOffsetX: 1, maxOffsetY: 1, maxRadius: 0.5 });
+  assert.equal(r.ok, false);
+  assert.equal(r.offsetX, null);
+  assert.equal(r.offsetY, null);
+  assert.match(r.errors[0].message, /没有落在/);
+  // 放宽限幅后可估中
+  const r2 = QC.estimateCalibration({ design, csv, maxOffsetX: 4, maxOffsetY: 1, maxRadius: 0.5 });
+  assert.equal(r2.ok, true);
+  assert.ok(Math.abs(r2.offsetX - -3) < 1e-9);
+});
+
+test('自动校准：优先级①匹配对数最多', () => {
+  // maxRadius=0.15：
+  //   候选 (0,0) 只能配 d2-m1（1 对）；
+  //   候选 (-2,0) 可同时配 d1-m1、d2-m2（2 对）
+  const design = [{ x: 0, y: 0 }, { x: 2, y: 0 }];
+  const csv = '2,0\n4,0'; // 整体 (+2,0)
+  const r = QC.estimateCalibration({ design, csv, maxOffsetX: 3, maxOffsetY: 1, maxRadius: 0.15 });
+  assert.equal(r.ok, true);
+  assert.ok(Math.abs(r.offsetX - -2) < 1e-9);
+  assert.equal(r.matchedCount, 2);
+});
+
+test('自动校准：优先级②匹配数相同时总残差最小', () => {
+  // 三个候选平移都能配满 3 对（maxRadius 1），但各实测点残余方向不同：
+  //   off=(-0.1,0)  总残差 0.5+0.0707≈0.5707（最小）
+  //   off=(-0.2,0.1) 总残差 ≈0.5855
+  //   off=(-0.4,-0.4) 总残差 ≈1.0148
+  const design = [{ x: 0, y: 0 }, { x: 6, y: 0 }, { x: 12, y: 0 }];
+  const csv = '0.4,0.4\n6.1,0\n12.15,-0.05';
+  const r = QC.estimateCalibration({ design, csv, maxOffsetX: 1, maxOffsetY: 1, maxRadius: 1 });
+  assert.equal(r.ok, true);
+  assert.equal(r.matchedCount, 3);
+  assert.ok(Math.abs(r.offsetX - -0.1) < 1e-9, 'dx=' + r.offsetX);
+  assert.equal(r.offsetY, 0);
+  assert.ok(Math.abs(r.totalResidual - 0.5707) < 1e-4, 'res=' + r.totalResidual);
+});
+
+test('自动校准：优先级③|dx|+|dy| 最小，优先级④ dx/dy 升序', () => {
+  // 单个设计点 (0,0)、两个实测点 (1,±1)，半径 3 内两个候选均为 2 对、总残差 2、
+  // L1 均为 2、dx 均为 -1；dy 升序应选 (-1,-1)
+  let r = QC.estimateCalibration({
+    design: [{ x: 0, y: 0 }], csv: '1,1\n1,-1',
+    maxOffsetX: 2, maxOffsetY: 2, maxRadius: 3
+  });
+  assert.equal(r.ok, true);
+  assert.ok(Math.abs(r.offsetX - -1) < 1e-9);
+  assert.ok(Math.abs(r.offsetY - -1) < 1e-9);
+
+  // 实测点 x=1 与 x=2：候选 -1 与 -2 都只配 1 对、残差 0；L1 更小的 -1 胜出
+  r = QC.estimateCalibration({
+    design: [{ x: 0, y: 0 }], csv: '2,0\n1,0',
+    maxOffsetX: 2, maxOffsetY: 2, maxRadius: 0.5
+  });
+  assert.equal(r.ok, true);
+  assert.ok(Math.abs(r.offsetX - -1) < 1e-9);
+  assert.equal(r.offsetY, 0);
+});
+
+test('自动校准：结果确定且不使用质心差', () => {
+  // 10 个设计点缺失 6 个，且实测多出 4 个远点；质心差会被严重拉偏，
+  // 候选匹配法仍应估中真实平移 (+0.2,+0.1)
+  const design = [];
+  for (let i = 0; i < 10; i++) design.push({ x: 5 + i * 6, y: 5 });
+  // 仅前 4 个设计点有对应实测，另加 4 个远处多余点
+  const measuredRows = [];
+  for (let i = 0; i < 4; i++) measuredRows.push((5 + i * 6 + 0.2) + ',5.1');
+  for (let k = 0; k < 4; k++) measuredRows.push((80 + k * 2) + ',40');
+  const csv = measuredRows.join('\n');
+  const r1 = QC.estimateCalibration({ design, csv, maxOffsetX: 1, maxOffsetY: 1, maxRadius: 0.3 });
+  const r2 = QC.estimateCalibration({ design, csv, maxOffsetX: 1, maxOffsetY: 1, maxRadius: 0.3 });
+  assert.equal(r1.ok, true);
+  assert.ok(Math.abs(r1.offsetX - -0.2) < 1e-9);
+  assert.ok(Math.abs(r1.offsetY - -0.1) < 1e-9);
+  assert.equal(r1.matchedCount, 4);
+  assert.deepEqual(r2, r1); // 同输入结果确定
+});
+
+test('自动校准：同一点对产生的相同平移去重为一个候选', () => {
+  // 两个设计点相距 6，两个实测点也相距 6：真实平移候选由两个点对重复产生
+  const design = [{ x: 0, y: 0 }, { x: 6, y: 0 }];
+  const r = QC.estimateCalibration({
+    design, csv: '0.5,0.2\n6.5,0.2',
+    maxOffsetX: 1, maxOffsetY: 1, maxRadius: 0.3
+  });
+  assert.equal(r.ok, true);
+  assert.equal(r.candidateCount, 1); // (-0.5,-0.2) 重复候选只计一次
+  assert.equal(r.matchedCount, 2);
+});
+
+test('自动校准：参数非法、CSV 错误或缺点时 ok=false 且保留错误', () => {
+  const design = [{ x: 5, y: 5 }];
+  assert.equal(QC.estimateCalibration({ design, csv: '5,5', maxOffsetX: -1, maxOffsetY: 1, maxRadius: 2 }).ok, false);
+  assert.equal(QC.estimateCalibration({ design, csv: '5,5', maxOffsetX: 1, maxOffsetY: 1, maxRadius: 0 }).ok, false);
+  assert.equal(QC.estimateCalibration({ design, csv: '5,5', maxOffsetX: 1, maxOffsetY: 1 }).ok, false);
+  const csvErr = QC.estimateCalibration({ design, csv: 'x,y\na,b', maxOffsetX: 1, maxOffsetY: 1, maxRadius: 2 });
+  assert.equal(csvErr.ok, false);
+  assert.ok(csvErr.errors.some(e => e.line === 2));
+  assert.equal(QC.estimateCalibration({ design, csv: '', maxOffsetX: 1, maxOffsetY: 1, maxRadius: 2 }).ok, false);
+  assert.equal(QC.estimateCalibration({ design: [], csv: '5,5', maxOffsetX: 1, maxOffsetY: 1, maxRadius: 2 }).ok, false);
+});
